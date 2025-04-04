@@ -3,11 +3,11 @@ import gurobipy as gp
 import config
 from utils.constraint_translator import translate_constraint_to_code
 
+
 class ShiftOptimizer:
     def __init__(self, variables: dict):
         self.variables = variables
         self.model = Model("Optimizador General de Turnos")
-        # Diccionario para almacenar la descripción en lenguaje natural de cada restricción (mapeo: nombre -> descripción)
         self.constraint_descriptions = {}
 
         # Local scope para exec
@@ -69,7 +69,7 @@ class ShiftOptimizer:
         """
         Agrega una restricción al modelo a partir de código Gurobi.
         Si ocurre un error en tiempo de ejecución (por discrepancias de variables),
-        vuelve a llamar a translate_constraint_to_code para re-traducir la restricción,
+        vuelve a llamar a translate_constraint_to_code para retraducir la restricción,
         incluyendo el mensaje de error completo, y reintenta la ejecución hasta un máximo de intentos.
         Si se alcanza el máximo, retorna False para indicar que no se pudo agregar la restricción.
         """
@@ -130,12 +130,39 @@ class ShiftOptimizer:
     def optimizar(self):
         self.model.setParam("TimeLimit", 30)
         self.model.optimize()
+
         if self.model.status == GRB.OPTIMAL:
             print("\n✅ Solución óptima encontrada")
-        else:
-            print("\n❌ No se encontró una solución óptima.")
+            return
+
+        if self.model.status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
+            print("\n❌ El modelo es inviable. Analizando restricciones conflictivas...\n")
             self.model.computeIIS()
             for c in self.model.getConstrs():
                 if c.IISConstr:
                     nl = self.constraint_descriptions.get(c.constrName, "Descripción no disponible")
-                    print(f"🔍 Restricción conflictiva: {c.constrName}.\nDescripción en lenguaje natural: {nl}")
+                    print(f"🔍 Restricción conflictiva: {c.constrName}\n📝 Descripción: {nl}")
+
+            # Intentar relajación
+            print("\n⚠️ Intentando relajar las restricciones para encontrar una solución cercana...")
+            orignumvars = self.model.NumVars
+            self.model.feasRelaxS(
+                relaxobjtype=0,  # No relajar el objetivo original
+                minrelax=False,  # No minimizar número de restricciones relajadas
+                vrelax=False,  # No relajar variables
+                crelax=True  # Sí relajar restricciones
+            )
+
+            self.model.optimize()
+            if self.model.status == GRB.OPTIMAL:
+                print("\n🔄 Modelo relajado resuelto con éxito.")
+                print(f"📉 Objetivo (relajado): {self.model.ObjVal}")
+                print("\n📊 Restricciones relajadas (valores de slack):")
+                slacks = self.model.getVars()[orignumvars:]
+                for sv in slacks:
+                    if sv.X > 1e-6:
+                        print(f"🔧 {sv.VarName} = {sv.X:g}")
+            else:
+                print("❌ El modelo relajado tampoco pudo resolverse.")
+        else:
+            print(f"\n⚠️ Optimización detenida. Estado: {self.model.status}")
