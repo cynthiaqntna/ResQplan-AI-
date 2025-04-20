@@ -40,12 +40,16 @@ class ShiftOptimizer:
                 break  # Si se ejecuta correctamente, salimos del bucle
             except Exception as e:
                 attempt += 1
-                print(f"Attempt {attempt} to compile decision_variables code failed: {e}. Retrying...")
+                print(f"Intento {attempt} de compilar el código de 'decision_variables' fallido: {e}. Reintentando...")
         else:
-            raise RuntimeError("Failed to compile decision_variables code after multiple attempts.")
+            raise RuntimeError("No se pudo compilar el código de 'decision_variables' después de múltiples intentos.")
 
-        # Almacenar la variable de decisión principal (se espera que sea 'x' o 'd')
-        self.decision_vars = local_scope.get("x") or local_scope.get("d")
+        # Detectar cualquier dict con claves tipo (int, int, int)
+        for name, val in local_scope.items():
+            if isinstance(val, dict) and all(isinstance(k, tuple) and len(k) == 3 for k in val.keys()):
+                self.decision_vars = val
+                break
+
         self.model.update()
 
     def obtener_contexto_ejecucion(self):
@@ -128,11 +132,25 @@ class ShiftOptimizer:
         self.model.setObjective(varianza, GRB.MINIMIZE)
 
     def optimizar(self):
-        self.model.setParam("TimeLimit", 30)
+        self.model.setParam("Threads", 1)
+        self.model.setParam("Presolve", 0)
+        self.model.setParam("MIPFocus", 2)
+
+        # 🔁 Activar el solution pool
+        self.model.setParam("PoolSearchMode", 2)
+        self.model.setParam("PoolSolutions", 10)
+
         self.model.optimize()
 
-        if self.model.status == GRB.OPTIMAL:
-            print("\n✅ Solución óptima encontrada")
+        if self.model.status == GRB.OPTIMAL or self.model.status == GRB.SUBOPTIMAL:
+            print(f"\n✅ Se encontraron {self.model.SolCount} soluciones factibles.")
+
+            # Aquí usamos solo la mejor (la activa por defecto)
+            print(f"\n🏆 Mejor solución encontrada (ObjVal = {self.model.ObjVal}):")
+            for key, var in self.decision_vars.items():
+                if var.X > 0.5:
+                    print(f"  {key} -> {var.X}")
+
             return
 
         if self.model.status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
@@ -143,15 +161,9 @@ class ShiftOptimizer:
                     nl = self.constraint_descriptions.get(c.constrName, "Descripción no disponible")
                     print(f"🔍 Restricción conflictiva: {c.constrName}\n📝 Descripción: {nl}")
 
-            # Intentar relajación
             print("\n⚠️ Intentando relajar las restricciones para encontrar una solución cercana...")
             orignumvars = self.model.NumVars
-            self.model.feasRelaxS(
-                relaxobjtype=0,  # No relajar el objetivo original
-                minrelax=False,  # No minimizar número de restricciones relajadas
-                vrelax=False,  # No relajar variables
-                crelax=True  # Sí relajar restricciones
-            )
+            self.model.feasRelaxS(relaxobjtype=0, minrelax=False, vrelax=False, crelax=True)
 
             self.model.optimize()
             if self.model.status == GRB.OPTIMAL:

@@ -4,12 +4,14 @@ import time
 import config
 from openai import OpenAI
 
+
 def get_openai_client():
     """Inicializa y devuelve un cliente OpenAI."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("⚠️ La variable de entorno OPENAI_API_KEY no está configurada.")
     return OpenAI(api_key=api_key)
+
 
 def extract_variables_from_context(context: str) -> dict:
     """Extrae variables clave y genera las variables de decisión en formato Gurobi."""
@@ -55,6 +57,8 @@ def translate_constraint_to_code(nl_constraint: str, variables: dict) -> str:
         "Si la restricción tiene una condición del tipo lb <= expr <= ub, "
         "descomponla en dos restricciones separadas para que Gurobi las acepte correctamente: "
         "model.addConstr(expr >= lb) y model.addConstr(expr <= ub). "
+        "Incluye un argumento 'name=' en cada restricción, generando un nombre identificativo y descriptivo "
+        "a partir de la restricción original (en inglés o snake_case si es largo). "
         "NO agregues explicaciones, comentarios ni bloques de código adicionales. "
         f"Las variables disponibles en este problema son:\n{json.dumps(variables, indent=2)}\n\n"
         "Usa ÚNICAMENTE estas variables en tu respuesta.\n"
