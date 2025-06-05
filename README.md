@@ -1,27 +1,196 @@
-## 🔥 Optimización de Turnos de Retenes
+# 🔥 ResqPlan-AI
 
-Este documento describe las restricciones utilizadas en el modelo de optimización de turnos para los retenes de incendios, asegurando un equilibrio entre operatividad, descanso y eficiencia.
+ResqPlan-AI es una herramienta de optimización de turnos basada en Gurobi y OpenAI que permite, a partir de una descripción en lenguaje natural, extraer automáticamente las variables del problema y traducir restricciones en lenguaje natural a código Gurobi. Está diseñada para conectarse con una interfaz externa de ingreso de datos (por ejemplo, un sistema web o una aplicación cliente) sin necesidad de crear una interfaz completa en este repositorio.
 
 ---
 
-## 📌 **Restricciones en el Modelo**
+## 📋 Contenido del repositorio
 
-### 1️⃣ **Un retén solo puede trabajar en un turno por día**
+- `main.py`  
+  Punto de entrada que abre un cuadro de diálogo minimalista en Tkinter para que el usuario ingrese:
+  1. La descripción global del problema (horarios, recursos, franjas, etc.).
+  2. Múltiples restricciones en lenguaje natural (cada línea representa una restricción).  
+  Tras pulsar “OK”, todas las restricciones se traducen y validan automáticamente, y luego el modelo se optimiza en bloque.  
+  > **Nota**: Este script se puede reemplazar o adaptar para recibir datos desde cualquier interfaz externa (web, móvil, etc.), enviando la descripción y las restricciones en un solo bloque de texto.
+
+- `models/shift_optimizer.py`  
+  Clase `ShiftOptimizer` que:
+  1. Recibe un diccionario de especificaciones (`specs`), que contiene `variables`, `resources` y un bloque de `decision_variables` como string.  
+  2. Construye el modelo de Gurobi, crea las variables de decisión y mantiene un contexto de ejecución dinámico.  
+  3. Valida cada restricción en un modelo temporal (evitando errores de sintaxis o errores lógicos antes de inyectar al modelo principal).  
+  4. Agrega las restricciones validadas al modelo principal y conserva mapeos de nombres de restricción → línea NL original.  
+  5. Optimiza el modelo, detecta infeasibilidades e intenta una relajación automática (`IIS + feasRelaxS`) si es necesario.
+
+- `utils/constraint_translator.py`  
+  Contiene dos funciones principales:
+  1. **`extract_variables_from_context(context: str) -> dict`**  
+     Usa la API de OpenAI para analizar la descripción del problema en lenguaje natural y devolver un JSON con:
+     - `variables`: diccionario con `dias`, `franjas`, `horarios` y listas de cada tipo de entidad (retenes, enfermeras, asignaturas…).  
+     - `resources`: diccionario de cantidades de recursos disponibles.  
+     - `decision_variables`: un bloque de Python (string) que crea todas las variables de decisión en Gurobi (`model.addVar`), devolviendo un `tupledict` o `dict`.  
+     - `detected_constraints`: (opcional) lista de oraciones del texto que se detectaron como restricciones automáticamente.  
+     En caso de error o contexto no válido, devuelve un JSON con clave `"error"` describiendo el problema.  
+     > **Conexión externa**: esta función se puede invocar desde cualquier cliente (por ejemplo, un servicio web) enviando el texto completo del problema y recibiendo el JSON listo para instanciar `ShiftOptimizer`.
+
+  2. **`translate_constraint_to_code(nl_constraint: str, specs: dict) -> str|dict`**  
+     Dada una restricción en lenguaje natural y el JSON de `specs`, invoca la API de OpenAI para generar un bloque de código Python que:
+     - Utilice `model.addConstr(...)` y `quicksum(...)` adecuadamente.  
+     - Nombre cada restricción con `name="..."` (snake_case basado en la frase original).  
+     - Devuelva un JSON de la forma `{"error": "..."}` si la restricción no aplica o no se ajusta al contexto.  
+     Se reintenta la traducción hasta `MAX_ATTEMPTS` veces en caso de errores de compilación.
+
+- `utils/result_visualizer.py`  
+  Función `exportar_resultados(model, decision_vars, specs)` que:
+  1. Recorre las variables de decisión con `var.X > 0.5`.  
+  2. Construye un DataFrame de pandas con columnas “Día”, “Turno” y “Elementos” (entidades asignadas).  
+  3. Exporta la información a un archivo Excel (`.xlsx`) con formato básico (colores, bordes).  
+  > Se puede adaptar para enviar resultados a una interfaz externa (por ejemplo, retornando un DataFrame o un JSON).
+
+- `config.py`  
+  Contiene parámetros globales, como `MAX_ATTEMPTS`, para el número máximo de reintentos en la traducción de restricciones.
+
+
+# 📦 requirements.txt
+
+Lista de dependencias necesarias para ejecutar ShiftOptimizer:
+
+- `gurobipy`: Cliente Python de Gurobi para crear y resolver el modelo de optimización.
+- `openai`: Cliente que se comunica con la API de OpenAI para traducir texto en lenguaje natural a código Python.
+- `pandas`: Para construir un DataFrame con el resumen de resultados (Día, Turno, Elementos).
+- `xlsxwriter`: Motor que usa pandas para exportar el DataFrame a un archivo Excel (.xlsx).
+
+---
+
+# 🚀 Uso en modo GUI mínimo
+
+Ejecutar el script principal:
+
+```bash
+python main.py
+```
+
+## Descripción del problema
+
+Aparecerá un cuadro emergente titulado “Descripción del problema”.
+
+Ingresa o pega todo el texto completo, por ejemplo:
+
+```csharp
+GESTIÓN DE TURNOS – EMERGENCIAS: Se requiere planificar los turnos para retenes contra incendios en situaciones de emergencia para un periodo de 6 días. ...
+```
+
+Pulsa OK.
+
+## Extracción de variables
+
+Se mostrará un mensaje indicando:
+
+```
+Extrayendo variables a partir del texto…
+```
+
+Internamente, `extract_variables_from_context` invoca la API de OpenAI y devuelve un diccionario con las claves:
+
+- `variables`
+- `resources`
+- `decision_variables`
+- `detected_constraints` (opcional)
+
+Si hay error, se mostrará un cuadro con el mensaje correspondiente.
+
+## Ingreso en bloque de restricciones
+
+Aparecerá un cuadro de texto multilínea (“Nueva restricción”) donde puedes pegar varias restricciones separadas por salto de línea:
+
+```python
+el número mínimo de retenes es 6 y el máximo 8 por turno
+un retén solo puede trabajar dos días seguidos y luego debe descansar 1
+los dos turnos consecutivos deben ser del mismo tipo y, tras el descanso, deben ser del turno contrario
+```
+
+Pulsa OK.
+
+El programa leerá cada línea, llamará a `translate_constraint_to_code`, validará y agregará cada restricción al modelo.
+
+## Optimización
+
+Se mostrará un mensaje:
+
+```
+Ejecutando optimización…
+```
+
+Si el modelo es factible, se mostrará:
+
+```yaml
+Objetivo: <valor_objetivo>
+Variables activadas:
+  x_<...> = 1
+  ...
+```
+
+Si es infactible, se calcula el IIS y se ejecuta `feasRelaxS()`. Se mostrará:
+
+```php-template
+Modelo relajado resuelto. Objetivo: <valor_relajado>
+Frases de restricciones relajadas:
+  - <frase1>
+  - <frase2>
+```
+
+## Exportación a Excel
+
+Después de optimizar, se exporta el archivo `resultados_turnos.xlsx`.
+
+Un cuadro confirmará:
+
+```
+Resultados exportados a 'resultados_turnos.xlsx'
+```
+
+---
+
+# 📐 Estructura de datos (`specs`)
+
+El JSON `specs` que utiliza ShiftOptimizer debe tener la forma:
+
+```jsonc
+{
+  "variables": {
+    "dias": 6,
+    "franjas": 2,
+    "horarios": ["Diurno", "Nocturno"],
+    "lista_retenes": ["R1", "R2", …],
+    "lista_enfermeras": ["E1", "E2", …],
+    "lista_asignaturas": ["A1", "A2", …]
+  },
+  "resources": {
+    // Ejemplo: "retenes": 11, "enfermeras": 20, "profesores": 5
+  },
+  "decision_variables": "<string Python válido>",
+  "detected_constraints": []
+}
+```
+
+El bloque `decision_variables` debe crear variables de decisión con `model.addVar(...)` y devolver un `tupledict` o `dict` con claves que empiecen con `"x_"`.
+
+---
+
+# 📖 Ejemplo de restricciones que OpenAI traduce y envía al modelo
+
+### Un retén solo puede trabajar en un turno por día
+
 ```python
 for r in range(self.num_retenes):
     for d in range(self.dias):
-        self.model.addConstr(quicksum(self.x[r, d, t] for t in range(self.num_turnos)) <= 1,
-                             name=f"reten_{r}_un_turno_dia_{d}")
+        self.model.addConstr(
+            quicksum(self.x[r, d, t] for t in range(self.num_turnos)) <= 1,
+            name=f"reten_{r}_un_turno_dia_{d}"
+        )
 ```
-📌 **Explicación**: Un retén no puede estar en **más de un turno por día**, garantizando que cada equipo solo trabaje una vez al día. Esto evita sobrecarga y permite una mejor planificación de los relevos.
 
-**Explicación técnica:**
-- Se usa `quicksum(self.x[r, d, t] for t in range(self.num_turnos))` para sumar los turnos en los que un retén está asignado en un mismo día.
-- La restricción impone que esta suma sea como máximo 1, evitando que un retén tenga múltiples turnos en un solo día.
+### Entre 3 y 4 retenes activos por turno
 
----
-
-### 2️⃣ **Entre 3 y 4 retenes activos por turno**
 ```python
 for d in range(self.dias):
     for t in range(self.num_turnos):
@@ -29,178 +198,71 @@ for d in range(self.dias):
         self.model.addConstr(expr <= self.max_activos, name=f"max_retenes_turno_{d}_{t}")
         self.model.addConstr(expr >= 3, name=f"min_retenes_turno_{d}_{t}")
 ```
-📌 **Explicación**: Controla que haya **mínimo 3 y máximo 4 retenes activos por turno**, garantizando un equipo suficiente pero sin sobrecargar el recurso humano.
 
-**Explicación técnica:**
-- `expr = quicksum(self.x[r, d, t] for r in range(self.num_retenes))` calcula la cantidad de retenes activos en cada turno.
-- Se agregan dos restricciones:
-  - `expr <= self.max_activos` para limitar el número máximo de retenes activos.
-  - `expr >= 3` para garantizar que haya al menos 3 retenes operando en cada turno.
+### Descanso mínimo de 12 horas antes de reincorporarse
 
----
-
-### 3️⃣ **Descanso mínimo de 12 horas antes de reincorporarse**
 ```python
 for r in range(self.num_retenes):
     for d in range(self.dias - 1):
-        self.model.addConstr(self.x[r, d, 1] + self.x[r, (d + 1) % self.dias, 0] <= 1,
-                             name=f"descanso_minimo_{r}_dia_{d}")
+        self.model.addConstr(
+            self.x[r, d, 1] + self.x[r, (d + 1) % self.dias, 0] <= 1,
+            name=f"descanso_minimo_{r}_dia_{d}"
+        )
 ```
-📌 **Explicación**: Evita que un retén trabaje en el turno nocturno y luego en el matutino del día siguiente, asegurando **un descanso mínimo de 12 horas**.
 
-**Explicación técnica:**
-- Un retén no puede trabajar en el turno nocturno de un día `(d,1)` y luego en el turno diurno del día siguiente `(d+1,0)`.
-- `self.x[r, d, 1] + self.x[r, (d + 1) % self.dias, 0]` suma la asignación de turnos consecutivos.
-- La restricción impone que esta suma sea como máximo 1, asegurando al menos 12 horas de descanso.
+### Ciclo de turnos ideal: Noche, Noche, Descanso, Mañana, Mañana, Descanso
 
----
-
-### 4️⃣ **Ciclo de turnos ideal: Noche, Noche, Descanso, Mañana, Mañana, Descanso**
 ```python
 for r in range(self.num_retenes):
     for d in range(self.dias - 5):
         self.model.addConstr(
             self.x[r, d, 1] + self.x[r, d+1, 1] + self.x[r, d+2, 0] +
             self.x[r, d+3, 0] + self.x[r, d+4, 1] + self.x[r, d+5, 1] <= 2,
-            name=f"ciclo_turnos_ideal_{r}_dia_{d}")
+            name=f"ciclo_turnos_ideal_{r}_dia_{d}"
+        )
 ```
-📌 **Explicación**: Se intenta respetar el **ciclo ideal de trabajo y descanso** para minimizar fatiga y asegurar rotaciones equilibradas.
 
-**Explicación técnica:**
-- La restricción fuerza un patrón de turnos equilibrado: **Noche, Noche, Descanso, Mañana, Mañana, Descanso**.
-- Se asegura que dentro de un período de 6 días, un retén no tenga más de dos turnos activos consecutivos.
+### Evitar relevos nocturnos a mitad de la noche
 
----
-
-### 5️⃣ **Evitar relevos nocturnos a mitad de la noche**
 ```python
 for r in range(self.num_retenes):
     for d in range(self.dias):
-        self.model.addConstr(self.x[r, d, 1] <= self.x[r, d, 0] + 1,
-                             name=f"evitar_relevos_noche_{r}_dia_{d}")
+        self.model.addConstr(
+            self.x[r, d, 1] <= self.x[r, d, 0] + 1,
+            name=f"evitar_relevos_noche_{r}_dia_{d}"
+        )
 ```
-📌 **Explicación**: Un retén solo puede trabajar en la noche si estuvo en el turno diurno previo o si ha descansado adecuadamente. Evita cambios de turno abruptos durante la madrugada.
 
-**Explicación técnica:**
-- `self.x[r, d, 1]` representa si un retén está en el turno nocturno.
-- `self.x[r, d, 1] <= self.x[r, d, 0] + 1` garantiza que solo los retenes que ya estaban activos en el día pueden pasar a la noche.
+### Solapamiento de turnos hasta las 17:30
 
----
-
-### 6️⃣ **Solapamiento de turnos hasta las 17:30**
 ```python
 for d in range(self.dias):
     self.model.addConstr(
         quicksum(self.x[r, d, 0] for r in range(self.num_retenes)) >=
         quicksum(self.x[r, d, 1] for r in range(self.num_retenes)),
-        name=f"solapamiento_turnos_{d}")
+        name=f"solapamiento_turnos_{d}"
+    )
 ```
-📌 **Explicación**: Asegura que haya **más retenes disponibles durante el día que en la noche**.
 
-**Explicación técnica:**
-- Se suma la cantidad de retenes en turno diurno y nocturno.
-- Se impone que los retenes diurnos sean igual o mayores a los nocturnos.
+### Relevos dinámicos en función del desgaste
 
----
-
-### 7️⃣ **Relevos dinámicos en función del desgaste**
 ```python
 for r in range(self.num_retenes):
     for d in range(self.dias):
         self.model.addConstr(
-            quicksum(self.x[r, d - i, t] for i in range(3) for t in range(self.num_turnos) if d - i >= 0) <= 2,
-            name=f"relevos_dinamicos_{r}_dia_{d}")
+            quicksum(self.x[r, d - i, t]
+                     for i in range(3)
+                     for t in range(self.num_turnos)
+                     if d - i >= 0) <= 2,
+            name=f"relevos_dinamicos_{r}_dia_{d}"
+        )
 ```
-📌 **Explicación**: Controla la carga de trabajo para evitar que un retén acumule **más de 2 turnos en un período de 3 días**.
 
-**Explicación técnica:**
-- Se limita la cantidad de turnos asignados en los últimos 3 días.
-- `quicksum(self.x[r, d - i, t] for i in range(3) for t in range(self.num_turnos) if d - i >= 0) <= 2` impone que un retén no tenga más de 2 turnos en dicho periodo.
 
-## 🔥 Restricciones Lógicas para el Modelo de Optimización de Turnos
+# 📝 Notas finales
 
-Esta sección describe restricciones en lenguaje natural que son lógicas, útiles y no deberían generar problemas en el modelo de optimización de turnos de retenes.
-
----
-
-### 1️⃣ **Cada retén debe trabajar al menos 10 turnos en el mes**
-📌 *Garantiza que todos los retenes participen activamente y evita asignaciones desiguales.*
-
-> **Restricción en lenguaje natural:**  
-> *Cada retén debe trabajar al menos 10 turnos en el mes.*
-
----
-
-### 2️⃣ **Cada retén no puede trabajar más de 15 turnos en el mes**
-📌 *Evita que algunos retenes trabajen excesivamente, garantizando una distribución equitativa del trabajo.*
-
-> **Restricción en lenguaje natural:**  
-> *Cada retén no puede trabajar más de 15 turnos en el mes.*
-
----
-
-### 3️⃣ **No puede haber dos retenes consecutivos con más de 3 días de descanso**
-📌 *Asegura que los retenes no queden inactivos por períodos prolongados y mantiene una rotación regular.*
-
-> **Restricción en lenguaje natural:**  
-> *Ningún retén puede tener más de 3 días seguidos sin trabajar.*
-
----
-
-### 4️⃣ **Los retenes deben trabajar turnos alternos cada dos días**
-📌 *Impone una alternancia entre los días de trabajo para equilibrar la carga laboral.*
-
-> **Restricción en lenguaje natural:**  
-> *Cada retén que trabaje un turno en un día no puede trabajar el turno del día siguiente, pero sí en el siguiente día.*
-
----
-
-### 5️⃣ **Cada retén debe tener al menos un turno nocturno por semana**
-📌 *Evita que algunos retenes solo trabajen en el día y otros solo en la noche, garantizando una distribución justa.*
-
-> **Restricción en lenguaje natural:**  
-> *Cada retén debe trabajar al menos un turno nocturno cada 7 días.*
-
----
-
-### 6️⃣ **Si un retén trabaja en el turno nocturno, no puede trabajar en el primer turno del día siguiente**
-📌 *Asegura un descanso adecuado después de trabajar en la noche.*
-
-> **Restricción en lenguaje natural:**  
-> *Si un retén trabaja en el turno nocturno, no puede trabajar en el turno diurno del día siguiente.*
-
----
-
-### 7️⃣ **Siempre debe haber al menos un retén en cada turno que haya trabajado el turno anterior**
-📌 *Mantiene cierta continuidad operativa entre turnos.*
-
-> **Restricción en lenguaje natural:**  
-> *Siempre debe haber al menos un retén en cada turno que haya trabajado en el turno anterior.*
-
----
-
-### 8️⃣ **Un retén solo puede trabajar como máximo 2 turnos seguidos antes de descansar**
-📌 *Evita la acumulación excesiva de turnos seguidos sin descanso.*
-
-> **Restricción en lenguaje natural:**  
-> *Un retén no puede trabajar más de dos turnos seguidos sin un día de descanso.*
-
----
-
-### 9️⃣ **Los retenes del Cabildo deben trabajar más turnos diurnos que nocturnos**
-📌 *Permite una diferenciación en la asignación de turnos según el tipo de retén.*
-
-> **Restricción en lenguaje natural:**  
-> *Los retenes del Cabildo deben tener al menos un 60% de sus turnos en el día.*
-
----
-
-### 🔟 **Los retenes de refuerzo no pueden trabajar más de 5 turnos nocturnos en el mes**
-📌 *Controla la carga de trabajo nocturna para los retenes de refuerzo.*
-
-> **Restricción en lenguaje natural:**  
-> *Los retenes de refuerzo no pueden trabajar más de 5 turnos nocturnos en el mes.*
-
----
-
+- **Validación en runtime**: Cada restricción en NL se compila y valida en un modelo temporal con `validar_restriccion()`. Si falla, se reintenta traducir con contexto del error hasta `MAX_ATTEMPTS`.
+- **Relajación automática**: Si el modelo es infactible, se calcula el IIS y se ejecuta `model.feasRelaxS()`. El usuario recibe un listado de restricciones que se “relajaron” (`slacks`).
+- **Conexión con interfaz externa**: Aunque este repositorio provee un ejemplo minimalista en Tkinter (`main.py`), es sencillo adaptar el flujo para recibir la descripción del problema y las restricciones desde cualquier sistema externo (servicio web, app, bot, etc.).
+- **Exportación**: Los resultados se guardan en `resultados_turnos.xlsx` con formato de tabla que muestra “Día”, “Turno” y “Elementos asignados”. También se puede adaptar para devolver un `DataFrame` o un `JSON` al frontend.
 

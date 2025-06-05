@@ -1,180 +1,283 @@
-from gurobipy import Model, GRB, quicksum
+from gurobipy import Model, GRB, quicksum, tupledict
 import gurobipy as gp
 import config
 from utils.constraint_translator import translate_constraint_to_code
 
 
 class ShiftOptimizer:
-    def __init__(self, variables: dict):
-        self.variables = variables
-        self.model = Model("Optimizador General de Turnos")
+    # ───────────────────────────────────────── constructor ────────────────
+    def __init__(self, specs: dict):
+        self.specs = specs
+        # guardo el bloque raw para re-ejecutar variables
+        self._dv_code_str = specs["decision_variables"]
+        self._compile_dv_code()
+        # mapas de restricciones
         self.constraint_descriptions = {}
+        self.restricciones_validadas = {}  # nl -> {"code":…, "activa":bool}
+        # contexto base (sin modelo aún)
+        self._build_base_exec_context()
+        # mapeo de constrName → frase NL
+        self.name_to_nl: dict[str, str] = {}
+        # mapeo de frase NL → lista de constrName
+        self.nl_to_constr_names: dict[str, list[str]] = {}
+        self.reset_model()
 
-        # Local scope para exec
-        local_scope = {
-            "model": self.model,
+    def _compile_dv_code(self):
+        code = (
+            self._dv_code_str
+            .replace("\\n", "\n")
+            .replace("self.model", "model")
+            .replace("self.", "")
+        )
+        code = code.replace("model.GRB.", "GRB.").replace("self.GRB.", "GRB.")
+        self._dv_code_compiled = compile(code, "<decision_variables>", "exec")
+
+    def _build_base_exec_context(self):
+        self.exec_context = {
             "GRB": GRB,
             "quicksum": quicksum,
             "gp": gp,
+            "specs": self.specs,
+            "data": self.specs,
+            "variables": self.specs.get("variables", {}),
+            "resources": self.specs.get("resources", {})
         }
+        for k, v in self.specs.get("variables", {}).items():
+            self.exec_context[k] = v
+        for k, v in self.specs.get("resources", {}).items():
+            self.exec_context[k] = v
 
-        # Cargar variables dinámicamente
-        for var_name, value in variables["variables"].items():
-            try:
-                value = int(value)
-            except (ValueError, TypeError):
-                pass  # Puede ser lista, dict, etc.
-            setattr(self, var_name, value)
-            local_scope[var_name] = value
+    def reset_model(self):
+        """Reconstruye el modelo, variables de decisión y contexto."""
+        self.model = Model("General Shift Optimizer (limpio)")
+        self.exec_context["model"] = self.model
 
-        # Ejecutar definición de variables de decisión usando el mismo diccionario para globals y locals
-        code = variables["decision_variables"].replace("self.model", "model").replace("self.", "")
+        # re-ejecución de creación de variables
+        exec(self._dv_code_compiled, self.exec_context)
 
-        # Intentamos compilar y ejecutar el código de decisión con reintentos si falla
-        max_attempts = config.MAX_ATTEMPTS
-        attempt = 0
-        while attempt < max_attempts:
-            try:
-                compiled_code = compile(code, "<string>", "exec")
-                exec(compiled_code, local_scope)
-                break  # Si se ejecuta correctamente, salimos del bucle
-            except Exception as e:
-                attempt += 1
-                print(f"Intento {attempt} de compilar el código de 'decision_variables' fallido: {e}. Reintentando...")
-        else:
-            raise RuntimeError("No se pudo compilar el código de 'decision_variables' después de múltiples intentos.")
-
-        # Detectar cualquier dict con claves tipo (int, int, int)
-        for name, val in local_scope.items():
-            if isinstance(val, dict) and all(isinstance(k, tuple) and len(k) == 3 for k in val.keys()):
-                self.decision_vars = val
-                break
+        # extracción de todas las x_*
+        self.decision_vars = {}
+        for k, v in self.exec_context.items():
+            if k.startswith("x_") and isinstance(v, (dict, tupledict)):
+                self.decision_vars.update(v)
+        if not self.decision_vars:
+            raise RuntimeError("No se encontraron variables de decisión tras reset_model()")
+        self.exec_context["x"] = self.decision_vars
 
         self.model.update()
+        print(f"\n🔄 Modelo reseteado con {len(self.decision_vars)} variables de decisión.")
 
-    def obtener_contexto_ejecucion(self):
-        """Construye un diccionario de contexto dinámico a partir de las variables definidas."""
-        contexto = {
-            "model": self.model,
-            "quicksum": quicksum,
-            "gp": gp,
-        }
-        for var_name in self.variables["variables"]:
-            contexto[var_name] = getattr(self, var_name)
-        if "x =" in self.variables["decision_variables"]:
-            contexto["x"] = self.decision_vars
-        elif "d =" in self.variables["decision_variables"]:
-            contexto["d"] = self.decision_vars
-        # Se asigna siempre el alias 'd_vars' para evitar conflictos en restricciones generadas
-        contexto["d_vars"] = self.decision_vars
-        return contexto
+    # ───────────────────────────────── agregar restricción ────────────────
+    def agregar_restriccion(self, nl: str) -> bool:
+        """Añade al modelo la restricción validada y activa."""
+        print("\n🔍 Restricciones validadas:", self.restricciones_validadas.keys())
+        info = self.restricciones_validadas.get(nl)
+        if not info:
+            print("⚠️  Restricción no validada previamente.")
+            return False
+        if not info["activa"]:
+            print("⏸️  Restricción desactivada.")
+            return False
 
-    def agregar_restriccion(self, nl_constraint: str, codigo_restriccion: str, max_attempts=config.MAX_ATTEMPTS):
-        """
-        Agrega una restricción al modelo a partir de código Gurobi.
-        Si ocurre un error en tiempo de ejecución (por discrepancias de variables),
-        vuelve a llamar a translate_constraint_to_code para retraducir la restricción,
-        incluyendo el mensaje de error completo, y reintenta la ejecución hasta un máximo de intentos.
-        Si se alcanza el máximo, retorna False para indicar que no se pudo agregar la restricción.
-        """
-        contexto = self.obtener_contexto_ejecucion()
-        attempt = 0
-        last_codigo = codigo_restriccion  # Guardamos el código original
-        while attempt < max_attempts:
-            print(f"Intentando agregar restricción, intento {attempt + 1}/{max_attempts}...")
-            try:
-                exec(last_codigo, contexto)
-                # Tras ejecutar, identificamos las restricciones nuevas agregadas:
-                nuevas_constr = [c for c in self.model.getConstrs() if c.constrName not in self.constraint_descriptions]
-                for c in nuevas_constr:
-                    self.constraint_descriptions[c.constrName] = nl_constraint
-                print("Restricción agregada correctamente.")
-                print("Código de restricción aceptado:")
-                print(last_codigo)
-                return True
-            except Exception as e:
-                attempt += 1
-                error_str = str(e)
-                print(f"Error al ejecutar la restricción (Intento {attempt}/{max_attempts}): {error_str}")
-                # Se modifica el prompt incluyendo el error completo para que el modelo intente corregir la restricción
-                nl_constraint_mod = (
-                    nl_constraint
-                    + "\nEl error completo es: " + error_str
-                    + "\nCorrige la restricción para que funcione correctamente."
-                )
-                last_codigo = translate_constraint_to_code(nl_constraint_mod, self.variables["variables"])
-        print("No se pudo agregar la restricción después de varios intentos. Por favor, ingresa otra restricción.")
-        return False
+        try:
+            # 1) inyectamos el código al modelo
+            # ① Capturamos el state previo en el modelo principal
+            prev = {c.constrName for c in self.model.getConstrs()}
+            # ② Inyectamos el código y forzamos update()
+            exec(info["code"], self.exec_context)
+            self.model.update()
+            # ③ Recalculamos la diferencia: nuevas restricciones
+            after = {c.constrName for c in self.model.getConstrs()}
+            names = list(after - prev)
 
-    def definir_funcion_objetivo_balanceo(self, tipo_entidad="entidades", nombre_var="x"):
-        """
-        Minimiza la varianza de carga entre entidades (por ejemplo, profesores, retenes).
-        Se adapta al nombre de la variable de decisión y entidades.
-        """
-        entidades = getattr(self, f"num_{tipo_entidad}", None)
-        periodos = getattr(self, "dias", getattr(self, "num_periodos", None))
-        slots = getattr(self, "num_franjas", getattr(self, "num_slots", None))
+            # 3) actualizamos ambos diccionarios con esos nombres
+            self.nl_to_constr_names[nl] = names
 
-        if not all([entidades, periodos, slots]):
-            print("⚠️ No se pueden aplicar balanceo: faltan dimensiones.")
-            return
+            for cname in names:
+                self.name_to_nl[cname] = nl
+                self.constraint_descriptions[cname] = nl
 
-        carga = {e: self.model.addVar(vtype=GRB.CONTINUOUS, name=f"carga_{e}") for e in range(entidades)}
+            # 4) impresión final para debug
+            print("📋 nl_to_constr_names (agregar):", self.nl_to_constr_names)
 
-        for e in range(entidades):
-            self.model.addConstr(
-                carga[e] == quicksum(self.decision_vars[e, p, s] for p in range(periodos) for s in range(slots)),
-                name=f"carga_total_{e}"
-            )
+            return True
+        except Exception as e:
+            print(f"❌ Error añadiendo restricción '{nl}': {e}")
+            return False
 
-        carga_media = quicksum(carga[e] for e in range(entidades)) / entidades
-        varianza = quicksum((carga[e] - carga_media) ** 2 for e in range(entidades))
-        self.model.setObjective(varianza, GRB.MINIMIZE)
-
+    # ───────────────────────────────── optimizar ──────────────────────────
     def optimizar(self):
+        self.reset_model()
+
+        # 2) agrego sólo activas (y mapeo constrName→frase NL)
+        for nl, info in self.restricciones_validadas.items():
+            if not info["activa"]:
+                continue
+
+            # nombres antes de inyectar
+            prev = {c.constrName for c in self.model.getConstrs()}
+            exec(info["code"], self.exec_context)
+            # nuevas restricciones
+            for c in self.model.getConstrs():
+                if c.constrName not in prev:
+                    self.name_to_nl[c.constrName] = nl
+                    self.constraint_descriptions[c.constrName] = nl
+
+
+
+        # 3) optimizo
         self.model.setParam("Threads", 1)
         self.model.setParam("Presolve", 0)
-        self.model.setParam("MIPFocus", 2)
-
-        # 🔁 Activar el solution pool
-        self.model.setParam("PoolSearchMode", 2)
-        self.model.setParam("PoolSolutions", 10)
-
         self.model.optimize()
 
-        if self.model.status == GRB.OPTIMAL or self.model.status == GRB.SUBOPTIMAL:
-            print(f"\n✅ Se encontraron {self.model.SolCount} soluciones factibles.")
+        status = self.model.status
+        print("\n═════════ RESULTADO OPTIMIZACIÓN ═════════")
+        print(f"Estado Gurobi: {status} ({self.model.Status})")
 
-            # Aquí usamos solo la mejor (la activa por defecto)
-            print(f"\n🏆 Mejor solución encontrada (ObjVal = {self.model.ObjVal}):")
-            for key, var in self.decision_vars.items():
+        if status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
+            print(f"Objetivo: {self.model.ObjVal}")
+            print("Variables activadas (>0.5):")
+            for var in self.model.getVars():
                 if var.X > 0.5:
-                    print(f"  {key} -> {var.X}")
-
+                    print(f"  · {var.VarName} = {var.X}")
+            print("════════════════════════════════════════")
             return
-
-        if self.model.status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
-            print("\n❌ El modelo es inviable. Analizando restricciones conflictivas...\n")
+        # … dentro de ShiftOptimizer.optimizar(), en el bloque infeasible …
+        if status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
+            print("❌ Modelo inviable. IIS:")
             self.model.computeIIS()
             for c in self.model.getConstrs():
                 if c.IISConstr:
-                    nl = self.constraint_descriptions.get(c.constrName, "Descripción no disponible")
-                    print(f"🔍 Restricción conflictiva: {c.constrName}\n📝 Descripción: {nl}")
+                    desc = self.constraint_descriptions.get(c.constrName, "(sin descripción)")
+                    print(f"   ↯ {c.constrName} — {desc}")
 
-            print("\n⚠️ Intentando relajar las restricciones para encontrar una solución cercana...")
-            orignumvars = self.model.NumVars
+            print("\n🔄 Intentando relajación automática …")
+            orig = self.model.NumVars
             self.model.feasRelaxS(relaxobjtype=0, minrelax=False, vrelax=False, crelax=True)
-
             self.model.optimize()
+
             if self.model.status == GRB.OPTIMAL:
-                print("\n🔄 Modelo relajado resuelto con éxito.")
-                print(f"📉 Objetivo (relajado): {self.model.ObjVal}")
-                print("\n📊 Restricciones relajadas (valores de slack):")
-                slacks = self.model.getVars()[orignumvars:]
+                print("✅ Modelo relajado resuelto. Objetivo:", self.model.ObjVal)
+                slacks = self.model.getVars()[orig:]
+                relaxed_nls = []
                 for sv in slacks:
                     if sv.X > 1e-6:
-                        print(f"🔧 {sv.VarName} = {sv.X:g}")
-            else:
-                print("❌ El modelo relajado tampoco pudo resolverse.")
+                        # Quitar los prefijos de slack (ArtP_ o ArtN_)
+                        cname = sv.VarName
+                        if cname.startswith("ArtP_") or cname.startswith("ArtN_"):
+                            cname = cname.split("_", 1)[1]
+                        # Recuperar la frase original
+                        phrase = self.constraint_descriptions.get(cname, f"(sin mapping para {cname})")
+                        relaxed_nls.append(phrase)
+                        relaxed_nls = list(dict.fromkeys(relaxed_nls))
+                        print(f"   · {phrase} (relajada: {sv.X:g})")
+
+                # Imprimir al final la lista de frases originales
+                if relaxed_nls:
+                    print("\n🔧 Frases originales de restricciones relajadas:")
+                    for p in relaxed_nls:
+                        print(f"  - {p}")
+
+                return {
+                    "status": self.model.status,
+                    "objective": self.model.ObjVal,
+                    "relaxed_constraints": relaxed_nls
+                }
+
+
         else:
-            print(f"\n⚠️ Optimización detenida. Estado: {self.model.status}")
+            print("⚠️  Optimización detenida. Estado=", status)
+        print("════════════════════════════════════════")
+
+    # ───────────────────────────────── imprimir vars ──────────────────────────
+    def _imprimir_decision_vars(self):
+        act = [(k, v.X) for k, v in self.decision_vars.items() if v.X > 0.5]
+        if not act:
+            print("No hay variables activadas.")
+            return
+        vars_dict = self.specs.get("variables", {})
+        reverse_map = {}
+        for lista, items in vars_dict.items():
+            if lista.startswith("lista_"):
+                for it in items:
+                    reverse_map[it] = lista
+        horarios = vars_dict.get("horarios", [])
+        for key, _ in act:
+            *entidades, di, fr = key
+            partes = [f"{e}({reverse_map.get(e,'??')})" for e in entidades]
+            dia = di + 1
+            turno = horarios[fr] if fr < len(horarios) else f"franja {fr}"
+            print(" · ".join(partes) + f" → día {dia}, {turno}")
+
+    # ───────────────────────────────── validar restricción ─────────────────
+    def validar_restriccion(self, nl: str, code: str, max_attempts: int = config.MAX_ATTEMPTS) -> bool:
+        attempt = 0
+        current = code
+        while attempt < max_attempts:
+            modelo_temp = Model(f"Temp_{attempt}")
+            ctx = {
+                "model": modelo_temp, "GRB": GRB, "quicksum": quicksum, "gp": gp,
+                "specs": self.specs, "data": self.specs,
+                "variables": self.specs.get("variables", {}),
+                "resources": self.specs.get("resources", {})
+            }
+            for k, v in self.specs.get("variables", {}).items(): ctx[k] = v
+            for k, v in self.specs.get("resources", {}).items(): ctx[k] = v
+
+            # reconstruyo vars
+            exec(self._dv_code_compiled, ctx)
+
+            try:
+                # Ejecuto el código traducido sobre el modelo temporal
+                # ① Capturamos el estado previo
+                prev = {c.constrName for c in modelo_temp.getConstrs()}
+                # ② Ejecutamos la restricción y forzamos update()
+                exec(current, ctx)
+                modelo_temp.update()
+                # ③ Obtenemos el set tras inyectar
+                after = {c.constrName for c in modelo_temp.getConstrs()}
+                # ④ La diferencia son las nuevas constrName
+                new_constrs = list(after - prev)
+                self.nl_to_constr_names[nl] = new_constrs
+                print("📋 nl_to_constr_names:", self.nl_to_constr_names)
+
+                # Para cada una:
+                for cname in new_constrs:
+                    # 1) Asocio el constrName a la frase NL original
+                    self.name_to_nl[cname] = nl
+                print("🔍 Mapeo name_to_nl tras validar:", self.name_to_nl)
+
+                # Marco la restricción como validada y activa
+                self.restricciones_validadas[nl] = {
+                    "code": current,
+                    "activa": True,
+                    "names": new_constrs
+                }
+
+                print(f"✔️  Restricción validada ({attempt + 1}): '{nl}' → {new_constrs}")
+                return True
+
+            except Exception as e:
+                attempt += 1
+                print(f"⚠️  Error validando (intento {attempt}): {e}")
+                # Reintento traduciendo la restricción al código corrigiendo el error
+                nl_mod = f"{nl}\nError: {e}"
+                current = translate_constraint_to_code(nl_mod, self.specs)
+
+    # ───────────────────────────────── editar restricción ─────────────────
+    def editar_restriccion(self, nl: str, nuevo_nl: str) -> bool:
+        if nl not in self.restricciones_validadas:
+            print("⚠️  No existe esa restricción.")
+            return False
+        was_active = self.restricciones_validadas[nl]["activa"]
+        print(f"✏️  Traduciendo '{nuevo_nl}'…")
+        new_code = translate_constraint_to_code(nuevo_nl, self.specs)
+        if not self.validar_restriccion(nuevo_nl, new_code):
+            print("❌  Edición fallida.")
+            return False
+        entry = self.restricciones_validadas.pop(nuevo_nl)
+        entry["activa"] = was_active
+        del self.restricciones_validadas[nl]
+        self.restricciones_validadas[nuevo_nl] = entry
+        print(f"✅  '{nl}' → '{nuevo_nl}' (activa={was_active})")
+        return True
