@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import scrolledtext
+from typing import Optional
 
 from models.shift_optimizer import ShiftOptimizer
 from utils.constraint_translator import extract_variables_from_context, translate_constraint_to_code
@@ -8,7 +9,7 @@ from utils.result_visualizer import exportar_resultados
 import gurobipy as gp
 
 
-def get_multiline_input(root, title: str, prompt: str, width=60, height=15) -> str | None:
+def get_multiline_input(root, title: str, prompt: str, width=60, height=15) -> Optional[str]:
     """
     Muestra un cuadro de diálogo modal con un Text de varias líneas.
     Devuelve el texto completo que el usuario introdujo (o None si canceló).
@@ -25,7 +26,7 @@ def get_multiline_input(root, title: str, prompt: str, width=60, height=15) -> s
 
     dialog = tk.Toplevel(root)
     dialog.title(title)
-    dialog.grab_set()  # Modal: bloquea interacción con la ventana principal
+    dialog.grab_set()
     dialog.geometry(f"{width * 8}x{height * 15}")
 
     label = tk.Label(dialog, text=prompt, justify=tk.LEFT, anchor="w")
@@ -41,7 +42,6 @@ def get_multiline_input(root, title: str, prompt: str, width=60, height=15) -> s
     cancel_button = tk.Button(btn_frame, text="Cancelar", width=10, command=on_cancel)
     cancel_button.pack(side=tk.LEFT, padx=5)
 
-    # Centrar respecto a root
     dialog.update_idletasks()
     x = root.winfo_x() + (root.winfo_width() - dialog.winfo_width()) // 2
     y = root.winfo_y() + (root.winfo_height() - dialog.winfo_height()) // 2
@@ -52,11 +52,9 @@ def get_multiline_input(root, title: str, prompt: str, width=60, height=15) -> s
 
 
 if __name__ == "__main__":
-    # Inicializar root de Tk y ocultarlo
     root = tk.Tk()
     root.withdraw()
 
-    # 1) Pedir descripción del problema en un Text multiline
     context = get_multiline_input(
         root,
         "Descripción del problema",
@@ -67,7 +65,6 @@ if __name__ == "__main__":
         root.destroy()
         exit(1)
 
-    # 2) Extraer variables/specs
     messagebox.showinfo("Procesando", "Extrayendo variables a partir del texto…")
     specs = extract_variables_from_context(context)
     if "error" in specs:
@@ -75,12 +72,10 @@ if __name__ == "__main__":
         root.destroy()
         exit(1)
 
-    # (Opcional) imprimir por consola las specs para debug
     print("\n--- Variables extraídas (specs) ---")
     print(specs)
     print("------------------------------------\n")
 
-    # 3) Crear instancia de ShiftOptimizer
     try:
         model = ShiftOptimizer(specs)
     except Exception as e:
@@ -88,7 +83,6 @@ if __name__ == "__main__":
         root.destroy()
         exit(1)
 
-    # 4) Pedir todas las restricciones a la vez, línea por línea
     constraints_text = get_multiline_input(
         root,
         "Restricciones",
@@ -98,26 +92,21 @@ if __name__ == "__main__":
         messagebox.showinfo("Sin restricciones", "No se agregó ninguna restricción. Se procede a optimizar.")
         constraints_list = []
     else:
-        # Dividir por líneas no vacías
         constraints_list = [line.strip() for line in constraints_text.splitlines() if line.strip()]
 
-    # 5) Procesar cada restricción en orden
     for nl_constraint in constraints_list:
-        # Traducir a código Gurobi
         code = translate_constraint_to_code(nl_constraint, specs)
         if isinstance(code, dict) and "error" in code:
             messagebox.showerror("Error en traducción",
                                  f"No se pudo traducir la restricción:\n'{nl_constraint}'\n\nError: {code['error']}")
             continue
 
-        # Validar en modelo temporal
         valid = model.validar_restriccion(nl_constraint, code)
         if not valid:
             messagebox.showerror("Validación fallida",
                                  f"No se pudo validar la restricción tras varios intentos:\n'{nl_constraint}'")
             continue
 
-        # Agregar al modelo principal
         added = model.agregar_restriccion(nl_constraint)
         if not added:
             messagebox.showwarning("No agregada",
@@ -125,11 +114,9 @@ if __name__ == "__main__":
         else:
             messagebox.showinfo("Añadida", f"Restricción agregada correctamente:\n'{nl_constraint}'")
 
-    # 6) Ejecutar optimización
     messagebox.showinfo("Optimización", "Ejecutando optimización con Gurobi…")
     model.optimizar()
 
-    # 7) Mostrar resultados
     if model.model.status == gp.GRB.OPTIMAL:
         activadas = [f"{var.VarName} = {var.X:g}" for var in model.model.getVars() if var.X > 0.5]
         resumen = "\n".join(activadas) if activadas else "No hay variables activadas."
@@ -147,12 +134,10 @@ if __name__ == "__main__":
             f"El modelo no alcanzó solución óptima (estado Gurobi: {model.model.Status})."
         )
 
-    # 8) Exportar a Excel
     try:
         exportar_resultados(model.model, model.decision_vars, specs)
         messagebox.showinfo("Exportación completada", "Resultados exportados a 'resultados_turnos.xlsx'.")
     except Exception as e:
         messagebox.showerror("Error al exportar", f"No se pudo exportar resultados:\n{e}")
 
-    # Cerrar la aplicación
     root.destroy()

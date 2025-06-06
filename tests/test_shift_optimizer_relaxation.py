@@ -19,12 +19,11 @@ def patch_extract_and_translate(monkeypatch):
             "dias": 6,
             "franjas": 2,
             "horarios": ["Diurno", "Nocturno"],
-            "lista_retenes": [f"R{i}" for i in range(1, 3)],      # 2 retenes ficticios
-            "lista_enfermeras": [f"E{i}" for i in range(1, 3)],   # 2 enfermeras ficticias
-            "lista_asignaturas": [f"A{i}" for i in range(1, 3)],  # 2 asignaturas ficticias
+            "lista_retenes": [f"R{i}" for i in range(1, 3)],
+            "lista_enfermeras": [f"E{i}" for i in range(1, 3)],
+            "lista_asignaturas": [f"A{i}" for i in range(1, 3)],
         },
         "resources": {},
-        # Bloque de decisión mínimo: una variable binaria
         "decision_variables": (
             "x_dummy = { (i, d, f): model.addVar(vtype=GRB.BINARY, name=f\"x_{i}_{d}_{f}\") "
             "for i in variables['lista_retenes'] for d in range(variables['dias']) for f in range(variables['franjas']) }"
@@ -72,7 +71,6 @@ def test_emergency_infeasible(emergency_context):
 
     model = ShiftOptimizer(variables)
 
-    # Restricciones 'normales' (no bloquean)
     normal_nl = "el número mínimo de retenes es 6 y el máximo 8 por turno"
     normal_code = ct.translate_constraint_to_code(normal_nl, variables["variables"])
     assert "quicksum(x_dummy.values()) <= 2" in normal_code
@@ -85,7 +83,6 @@ def test_emergency_infeasible(emergency_context):
     assert model.validar_restriccion(descanso_nl, descanso_code)
     assert model.agregar_restriccion(descanso_nl)
 
-    # Restricción imposible (mínimo 10 retenes)
     infeasible_nl = "el número mínimo de 10 retenes por turno"
     infeasible_code = ct.translate_constraint_to_code(infeasible_nl, variables["variables"])
     assert ">= 10" in infeasible_code
@@ -94,7 +91,7 @@ def test_emergency_infeasible(emergency_context):
 
     model.optimizar()
     assert model.model.status == gp.GRB.OPTIMAL
-    assert model.model.ObjVal > 0  # Indica que se relajaron restricciones
+    assert model.model.ObjVal > 0
 
 
 def test_academic_schedule_infeasible(academic_context):
@@ -104,7 +101,6 @@ def test_academic_schedule_infeasible(academic_context):
 
     model = ShiftOptimizer(variables)
 
-    # Restricciones 'normales'
     carga_nl = "cada asignatura se impartirá exactamente 4 horas semanales"
     carga_code = ct.translate_constraint_to_code(carga_nl, variables["variables"])
     assert "quicksum(x_dummy.values()) <= 2" in carga_code
@@ -117,7 +113,6 @@ def test_academic_schedule_infeasible(academic_context):
     assert model.validar_restriccion(solap_nl, solap_code)
     assert model.agregar_restriccion(solap_nl)
 
-    # Restricción imposible: exactamente 8 horas
     infeasible_nl = "cada asignatura se impartirá exactamente 8 horas semanales"
     infeasible_code = ct.translate_constraint_to_code(infeasible_nl, variables["variables"])
     assert ">= 10" in infeasible_code
@@ -126,7 +121,7 @@ def test_academic_schedule_infeasible(academic_context):
 
     model.optimizar()
     assert model.model.status == gp.GRB.OPTIMAL
-    assert model.model.ObjVal > 0  # Hubo relajación
+    assert model.model.ObjVal > 0
 
 
 def test_hospital_schedule_infeasible(hospital_context):
@@ -136,7 +131,6 @@ def test_hospital_schedule_infeasible(hospital_context):
 
     model = ShiftOptimizer(variables)
 
-    # Restricciones 'normales'
     num_nl = "cada turno debe contar con un mínimo de 5 y un máximo de 7 enfermeras"
     num_code = ct.translate_constraint_to_code(num_nl, variables["variables"])
     assert "quicksum(x_dummy.values()) <= 2" in num_code
@@ -149,7 +143,6 @@ def test_hospital_schedule_infeasible(hospital_context):
     assert model.validar_restriccion(descanso_nl, descanso_code)
     assert model.agregar_restriccion(descanso_nl)
 
-    # Restricción imposible: mínimo 10 enfermeras
     infeasible_nl = "cada turno debe contar con un mínimo de 10 enfermeras"
     infeasible_code = ct.translate_constraint_to_code(infeasible_nl, variables["variables"])
     assert ">= 10" in infeasible_code
@@ -158,4 +151,4 @@ def test_hospital_schedule_infeasible(hospital_context):
 
     model.optimizar()
     assert model.model.status == gp.GRB.OPTIMAL
-    assert model.model.ObjVal > 0  # Se relajaron restricciones
+    assert model.model.ObjVal > 0

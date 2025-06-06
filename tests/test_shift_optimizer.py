@@ -13,19 +13,16 @@ def patch_extract_and_translate(monkeypatch):
     de modo que ShiftOptimizer siempre pueda optimizar con éxito.
     """
 
-    # Especificaciones mínimas comunes: 6 días, 2 franjas (diurno, nocturno),
-    # listas ficticias para retenes, enfermeras y asignaturas.
     dummy_specs = {
         "variables": {
             "dias": 6,
             "franjas": 2,
             "horarios": ["Diurno", "Nocturno"],
-            "lista_retenes": [f"R{i}" for i in range(1, 3)],      # 2 retenes ficticios
-            "lista_enfermeras": [f"E{i}" for i in range(1, 3)],   # 2 enfermeras ficticias
-            "lista_asignaturas": [f"A{i}" for i in range(1, 3)],  # 2 asignaturas ficticias
+            "lista_retenes": [f"R{i}" for i in range(1, 3)],
+            "lista_enfermeras": [f"E{i}" for i in range(1, 3)],
+            "lista_asignaturas": [f"A{i}" for i in range(1, 3)],
         },
         "resources": {},
-        # Bloque de decisión mínimo: una variable binaria para que el modelo no esté vacío.
         "decision_variables": (
             "self.x_dummy = { (i, d, f): model.addVar(vtype=GRB.BINARY, name=f\"x_{i}_{d}_{f}\") "
             "for i in variables['lista_retenes'] for d in range(variables['dias']) for f in range(variables['franjas']) }"
@@ -33,11 +30,9 @@ def patch_extract_and_translate(monkeypatch):
     }
 
     def fake_extract(context):
-        # Ignora el contexto real y devuelve las specs dummy
         return dummy_specs.copy()
 
     def fake_translate(nl_constraint, specs):
-        # Retorna siempre una restricción trivial (1 == 1) nombrada según el texto NL.
         safe_name = nl_constraint.replace(" ", "_")[:20]
         return f"model.addConstr(1 == 1, name='{safe_name}')"
 
@@ -89,7 +84,6 @@ def test_emergency_feasible(emergency_context):
 
     model = ShiftOptimizer(variables)
 
-    # Para cada restricción, primero validamos y luego agregamos
     for nl in [
         "el número mínimo de retenes es 6 y el máximo 8 por turno",
         "un retén solo puede trabajar dos días seguidos y luego debe descansar 1",
@@ -98,10 +92,8 @@ def test_emergency_feasible(emergency_context):
     ]:
         code = ct.translate_constraint_to_code(nl, variables["variables"])
         assert code.startswith("model.addConstr"), "translate_constraint_to_code debe devolver addConstr"
-        # 1) Validar
         valid = model.validar_restriccion(nl, code)
         assert valid, f"validar_restriccion falló para: {nl}"
-        # 2) Agregar
         added = model.agregar_restriccion(nl)
         assert added, f"No se pudo agregar la restricción: {nl}"
 

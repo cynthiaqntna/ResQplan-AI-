@@ -5,20 +5,14 @@ from utils.constraint_translator import translate_constraint_to_code
 
 
 class ShiftOptimizer:
-    # ───────────────────────────────────────── constructor ────────────────
     def __init__(self, specs: dict):
         self.specs = specs
-        # guardo el bloque raw para re-ejecutar variables
         self._dv_code_str = specs["decision_variables"]
         self._compile_dv_code()
-        # mapas de restricciones
         self.constraint_descriptions = {}
-        self.restricciones_validadas = {}  # nl -> {"code":…, "activa":bool}
-        # contexto base (sin modelo aún)
+        self.restricciones_validadas = {}
         self._build_base_exec_context()
-        # mapeo de constrName → frase NL
         self.name_to_nl: dict[str, str] = {}
-        # mapeo de frase NL → lista de constrName
         self.nl_to_constr_names: dict[str, list[str]] = {}
         self.reset_model()
 
@@ -52,10 +46,8 @@ class ShiftOptimizer:
         self.model = Model("General Shift Optimizer (limpio)")
         self.exec_context["model"] = self.model
 
-        # re-ejecución de creación de variables
         exec(self._dv_code_compiled, self.exec_context)
 
-        # extracción de todas las x_*
         self.decision_vars = {}
         for k, v in self.exec_context.items():
             if k.startswith("x_") and isinstance(v, (dict, tupledict)):
@@ -67,7 +59,6 @@ class ShiftOptimizer:
         self.model.update()
         print(f"\n🔄 Modelo reseteado con {len(self.decision_vars)} variables de decisión.")
 
-    # ───────────────────────────────── agregar restricción ────────────────
     def agregar_restriccion(self, nl: str) -> bool:
         """Añade al modelo la restricción validada y activa."""
         print("\n🔍 Restricciones validadas:", self.restricciones_validadas.keys())
@@ -80,24 +71,18 @@ class ShiftOptimizer:
             return False
 
         try:
-            # 1) inyectamos el código al modelo
-            # ① Capturamos el state previo en el modelo principal
             prev = {c.constrName for c in self.model.getConstrs()}
-            # ② Inyectamos el código y forzamos update()
             exec(info["code"], self.exec_context)
             self.model.update()
-            # ③ Recalculamos la diferencia: nuevas restricciones
             after = {c.constrName for c in self.model.getConstrs()}
             names = list(after - prev)
 
-            # 3) actualizamos ambos diccionarios con esos nombres
             self.nl_to_constr_names[nl] = names
 
             for cname in names:
                 self.name_to_nl[cname] = nl
                 self.constraint_descriptions[cname] = nl
 
-            # 4) impresión final para debug
             print("📋 nl_to_constr_names (agregar):", self.nl_to_constr_names)
 
             return True
@@ -105,19 +90,15 @@ class ShiftOptimizer:
             print(f"❌ Error añadiendo restricción '{nl}': {e}")
             return False
 
-    # ───────────────────────────────── optimizar ──────────────────────────
     def optimizar(self):
         self.reset_model()
 
-        # 2) agrego sólo activas (y mapeo constrName→frase NL)
         for nl, info in self.restricciones_validadas.items():
             if not info["activa"]:
                 continue
 
-            # nombres antes de inyectar
             prev = {c.constrName for c in self.model.getConstrs()}
             exec(info["code"], self.exec_context)
-            # nuevas restricciones
             for c in self.model.getConstrs():
                 if c.constrName not in prev:
                     self.name_to_nl[c.constrName] = nl
@@ -125,7 +106,6 @@ class ShiftOptimizer:
 
 
 
-        # 3) optimizo
         self.model.setParam("Threads", 1)
         self.model.setParam("Presolve", 0)
         self.model.optimize()
@@ -142,7 +122,6 @@ class ShiftOptimizer:
                     print(f"  · {var.VarName} = {var.X}")
             print("════════════════════════════════════════")
             return
-        # … dentro de ShiftOptimizer.optimizar(), en el bloque infeasible …
         if status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
             print("❌ Modelo inviable. IIS:")
             self.model.computeIIS()
@@ -162,17 +141,14 @@ class ShiftOptimizer:
                 relaxed_nls = []
                 for sv in slacks:
                     if sv.X > 1e-6:
-                        # Quitar los prefijos de slack (ArtP_ o ArtN_)
                         cname = sv.VarName
                         if cname.startswith("ArtP_") or cname.startswith("ArtN_"):
                             cname = cname.split("_", 1)[1]
-                        # Recuperar la frase original
                         phrase = self.constraint_descriptions.get(cname, f"(sin mapping para {cname})")
                         relaxed_nls.append(phrase)
                         relaxed_nls = list(dict.fromkeys(relaxed_nls))
                         print(f"   · {phrase} (relajada: {sv.X:g})")
 
-                # Imprimir al final la lista de frases originales
                 if relaxed_nls:
                     print("\n🔧 Frases originales de restricciones relajadas:")
                     for p in relaxed_nls:
@@ -189,7 +165,6 @@ class ShiftOptimizer:
             print("⚠️  Optimización detenida. Estado=", status)
         print("════════════════════════════════════════")
 
-    # ───────────────────────────────── imprimir vars ──────────────────────────
     def _imprimir_decision_vars(self):
         act = [(k, v.X) for k, v in self.decision_vars.items() if v.X > 0.5]
         if not act:
@@ -209,7 +184,6 @@ class ShiftOptimizer:
             turno = horarios[fr] if fr < len(horarios) else f"franja {fr}"
             print(" · ".join(partes) + f" → día {dia}, {turno}")
 
-    # ───────────────────────────────── validar restricción ─────────────────
     def validar_restriccion(self, nl: str, code: str, max_attempts: int = config.MAX_ATTEMPTS) -> bool:
         attempt = 0
         current = code
@@ -224,30 +198,21 @@ class ShiftOptimizer:
             for k, v in self.specs.get("variables", {}).items(): ctx[k] = v
             for k, v in self.specs.get("resources", {}).items(): ctx[k] = v
 
-            # reconstruyo vars
             exec(self._dv_code_compiled, ctx)
 
             try:
-                # Ejecuto el código traducido sobre el modelo temporal
-                # ① Capturamos el estado previo
                 prev = {c.constrName for c in modelo_temp.getConstrs()}
-                # ② Ejecutamos la restricción y forzamos update()
                 exec(current, ctx)
                 modelo_temp.update()
-                # ③ Obtenemos el set tras inyectar
                 after = {c.constrName for c in modelo_temp.getConstrs()}
-                # ④ La diferencia son las nuevas constrName
                 new_constrs = list(after - prev)
                 self.nl_to_constr_names[nl] = new_constrs
                 print("📋 nl_to_constr_names:", self.nl_to_constr_names)
 
-                # Para cada una:
                 for cname in new_constrs:
-                    # 1) Asocio el constrName a la frase NL original
                     self.name_to_nl[cname] = nl
                 print("🔍 Mapeo name_to_nl tras validar:", self.name_to_nl)
 
-                # Marco la restricción como validada y activa
                 self.restricciones_validadas[nl] = {
                     "code": current,
                     "activa": True,
@@ -260,11 +225,9 @@ class ShiftOptimizer:
             except Exception as e:
                 attempt += 1
                 print(f"⚠️  Error validando (intento {attempt}): {e}")
-                # Reintento traduciendo la restricción al código corrigiendo el error
                 nl_mod = f"{nl}\nError: {e}"
                 current = translate_constraint_to_code(nl_mod, self.specs)
 
-    # ───────────────────────────────── editar restricción ─────────────────
     def editar_restriccion(self, nl: str, nuevo_nl: str) -> bool:
         if nl not in self.restricciones_validadas:
             print("⚠️  No existe esa restricción.")

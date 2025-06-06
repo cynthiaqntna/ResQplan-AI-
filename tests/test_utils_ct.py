@@ -1,5 +1,3 @@
-# tests/test_constraint_translator.py
-
 import pytest
 import json
 
@@ -39,7 +37,6 @@ def patch_openai_client(monkeypatch):
 
 
 def test_extract_variables_success():
-    # Preparamos un JSON de respuesta válido para extract_variables_from_context
     fake_json = {
         "variables": {
             "num_asignaturas": 5,
@@ -69,7 +66,6 @@ def test_extract_variables_success():
     )
     variables = ct.extract_variables_from_context(context)
 
-    # Verificamos que la salida coincida con el JSON fake
     assert "variables" in variables
     v = variables["variables"]
     assert v["num_asignaturas"] == 5
@@ -87,7 +83,6 @@ def test_extract_variables_success():
 
 
 def test_extract_variables_error():
-    # Simulamos que la respuesta de ChatGPT es un JSON de error
     error_json = {"error": "El texto no describe un problema de turnos válido."}
     ct._dummy_content = json.dumps(error_json)
 
@@ -100,7 +95,6 @@ def test_extract_variables_error():
 
 
 def test_translate_constraint_success():
-    # Preparamos un fragmento de código Python válido para translate_constraint_to_code
     fake_code = (
         "for a in variables['lista_asignaturas']:\n"
         "    for d in range(variables['dias']):\n"
@@ -121,8 +115,7 @@ def test_translate_constraint_success():
     codigo = ct.translate_constraint_to_code(nl_constraint, specs)
 
     assert isinstance(codigo, str)
-    assert "for" in codigo  # Debe contener un bucle for
-    # Debe compilarse sin errores
+    assert "for" in codigo
     try:
         compile(codigo, "<string>", "exec")
     except Exception as e:
@@ -130,7 +123,6 @@ def test_translate_constraint_success():
 
 
 def test_translate_constraint_error():
-    # Simulamos que ChatGPT retorna un JSON con clave "error"
     error_json = {"error": "La restricción no aplica al contexto proporcionado."}
     ct._dummy_content = json.dumps(error_json)
 
@@ -151,7 +143,6 @@ def test_translate_constraint_error():
 
 
 def test_extract_variables_minimal_context():
-    # Respuesta mínima pero válida
     fake_json = {
         "variables": {
             "num_asignaturas": 1,
@@ -177,7 +168,6 @@ def test_extract_variables_minimal_context():
     assert v["dias"] == 1
     assert v["franjas"] == 1
     assert v["horarios"] == ["08:00-09:00"]
-    # decision_variables debe existir y compilar
     dv_code = variables["decision_variables"]
     assert dv_code
     try:
@@ -187,7 +177,6 @@ def test_extract_variables_minimal_context():
 
 
 def test_decision_variables_compilation():
-    # Verificamos que 'decision_variables' compile correctamente
     fake_json = {
         "variables": {
             "lista_asignaturas": ["A1", "A2", "A3"],

@@ -18,7 +18,6 @@ def exportar_resultados(model, decision_vars, variables, archivo_salida=None):
                 reverse_map[item] = nombre_lista.replace("lista_", "")
 
     filas = []
-    # CAMBIO AQUÍ: iterar sobre (key, var) directamente
     for key, var in decision_vars.items():
         if var.X > 0.5:
             *entidades, dia_idx, franja_idx = key
